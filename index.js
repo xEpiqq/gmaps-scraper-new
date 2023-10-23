@@ -1,113 +1,156 @@
-import puppeteerExtra from "puppeteer-extra"
-import stealthPlugin from "puppeteer-extra-plugin-stealth"
-import chromium from "@sparticuz/chromium"
+
+import puppeteerExtra from "puppeteer-extra";
+import stealthPlugin from "puppeteer-extra-plugin-stealth";
+import chromium from "@sparticuz/chromium";
 import { v4 as uuidv4 } from 'uuid';
 import { updateDoc, arrayUnion, doc } from 'firebase/firestore';
-import { db } from "./firebase.js"
+import { db } from "./firebase.js";
+import { collection, addDoc } from "firebase/firestore";
 
-
-async function scrape(url, list) {
-
-    const userRef = doc(db, `sheets/${list}`)
-
-    puppeteerExtra.use(stealthPlugin())
-
-    const browser = await puppeteerExtra.launch({
-        headless: false,
-        executablePath: "/usr/bin/google-chrome"
-    })
-
-    // const browser = await puppeteerExtra.launch({
-    //     args: chromium.args,
-    //     defaultViewport: chromium.defaultViewport,
-    //     executablePath: await chromium.executablePath(),
-    //     ignoreHTTPSErrors: true,
-    //     headless: chromium.headless,
-    // })
-
-    const page = await browser.newPage()
-    await page.goto(url)
-    await page.waitForTimeout(2000)
-    const divs = await page.$$('div[jscontroller="AtSb"]')
-    // shuffle the array
-    for (let i = divs.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [divs[i], divs[j]] = [divs[j], divs[i]];
-    }
-
-
-    for (const div of divs) {
-        await div.click()
-        const randomIntervalOne = Math.floor(Math.random() * (2500 - 1500 + 1) + 1500 )
-        await page.waitForTimeout(randomIntervalOne)
-
-        const business_name = await page.$eval('div[class="SPZz6b"]', (el) => el.innerText).catch(() => 'none');
-        const website = await page.$eval('a[class="dHS6jb"]', (el) => el.href).catch(() => 'none');
-        const address = await page.$eval('span[class="LrzXr"]', (el) => el.innerText).catch(() => 'none');
-        const phone_number = await page.$eval('a[jscontroller="LWZElb"]', (el) => el.innerText).catch(() => 'none');
-        const rating_content = await page.$eval('div[class="Ob2kfd"]', (el) => el.innerText).catch(() => 'none');
-
-        const [ratingStr, numberStr] = rating_content.split('(')
-        const pure_rating = parseFloat(ratingStr)
-        const ratings_count = parseInt(numberStr.replace(/\(|\)/g, ''))
-        
-        let stripped_url = website ? website.replace(/^(https?:\/\/)?(www\.)?/, '').split('/')[0] : '';
-        const obj = uuidv4()
-
-        const newSheet = { 
-            biz: business_name,
-            site: stripped_url, 
-            phone: phone_number,
-            address: address, 
-            email: "none", 
-            rating: pure_rating,
-            ratings: ratings_count,
-            template: "none",
-            score: 0,
-            obj: obj,
-        }
-
-        await updateDoc(userRef, {
-            lists: arrayUnion(newSheet)
-        })
-
-        const randomInterval = Math.floor(Math.random() * (700 - 300 + 1) + 300)
-        await page.waitForTimeout(randomInterval)
-
-        fetch('https://lu95yfsix7.execute-api.us-west-2.amazonaws.com/default/scavenger-site-scraper', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                list_id: list,
-                url_i: stripped_url,
-                obj_id: obj,
-            }),
-        })
-    }
-    
-    const pages = await browser.pages()
-    await Promise.all(pages.map((page) => page.close()))
-    await browser.close()
-    return
-}
-
+let results = [];
 
 export const handler = async (event) => {
     const body = JSON.parse(event.body)
     const { url, list } = body
-    await scrape(url, list)
+    const results = await GScrape(url, list)
     
     return {
         statusCode: 200,
-        body: JSON.stringify({ message: "consider it scraped"})
+        body: JSON.stringify(results)
     }
 }
 
-handler({
-    body: JSON.stringify({
-        url: "https://www.google.com/search?tbm=lcl&q=plumbers+in+provo+utah#rlfi=hd:;start:20",
-        list: "eaea"
-    }),
-})
+async function GScrape(url, list) {
+
+    puppeteerExtra.use(stealthPlugin())
+    
+    // const browser = await puppeteerExtra.launch({
+    //     headless: false,
+    //     executablePath: "/usr/bin/google-chrome"
+    // })
+
+    const browser = await puppeteerExtra.launch({
+        args: chromium.args,
+        defaultViewport: chromium.defaultViewport,
+        executablePath: await chromium.executablePath(),
+        ignoreHTTPSErrors: true,
+        headless: "new",
+    })
+    
+    const page = await browser.newPage();
+    await page.goto(url, { timeout: 60000 });
+    await page.waitForTimeout(3000);
+
+    const paginateNumber = 20;
+
+    let links = await page.$$eval('a.fl', as => as.map(a => a.href));
+
+    try {
+        for (let i = 0; i < paginateNumber; i++) {
+            await page.waitForTimeout(1500);
+            const elements = await page.$$('div[jscontroller="AtSb"]')
+            await scrape(elements, list, url);
+            const link = links[i];
+            await page.goto(link, { timeout: 60000 });
+        }
+    } catch {
+        console.log("No more pages");
+        return results
+    }
+
+}
+
+async function scrape(elements, list, url) {
+
+    const userRef = doc(db, `sheets/${list}`)
+
+    for (let i = 0; i < elements.length; i++) {
+
+        let siteLink, address, phoneNumber
+
+        const element = elements[i];
+        const name = await element.$eval('span.OSrXXb', node => node.innerText).catch(() => "");
+        const rating = await element.$eval('span.yi40Hd', node => node.innerText).catch(() => "");
+        const totalReviewsCrude = await element.$eval('span.RDApEe', node => node.innerText).catch(() => "");
+        const ratings = totalReviewsCrude.replace(/\(|\)/g, "");
+
+
+        const website = await element.$eval('a.L48Cpd', node => node.href).catch(() => "");
+        const directions = await element.$eval('a.VByer', node => node.getAttribute('data-url')).catch(() => "");
+        
+        try {
+            const details = await element.$('div.rllt__details');
+            const misc = await details.$eval('div:nth-child(3)', node => node.innerText).catch(() => "");
+            const misc2 = await details.$eval('div:nth-child(4)', node => node.innerText).catch(() => "");
+            const misc3 = misc + misc2;
+            const phoneRegex = /(\d{3})\D*(\d{3})\D*(\d{4})/;
+            phoneNumber = misc3.match(phoneRegex)[0];
+            phoneNumber = phoneNumber.replace(/\D/g, "");
+        } catch {
+            phoneNumber = "";
+        }
+
+        try {
+            const crudeAddress = directions.replace(/\+/g, " ");
+            const titleLast = name.split(" ").slice(-1)[0] + ", "
+            const betterAddress = crudeAddress.split(titleLast)[1]
+            address = betterAddress.split("/data")[0]
+            const addressPieces = address.split(" ");
+            const filteredAddress = addressPieces.filter(piece => !piece.includes("%"));
+            address = filteredAddress.join(" ");
+        } catch {
+            address = "";
+        }
+
+        if (website) {
+            const webUrl = new URL(website);
+            siteLink = webUrl.hostname;
+            // if siteLink includes "facebook"
+            if (siteLink.includes("facebook")) {
+                try{
+                    siteLink = website.split("//")[1];
+                } catch {
+                    siteLink = "";
+                }
+            }
+
+        } else {
+            siteLink = "";
+        }
+
+        if (name === "") {
+            continue;
+        }        
+
+        const sheetItemId = uuidv4();
+
+        const data = { name, rating, ratings, phoneNumber, siteLink, address, performance_score: 0, sheetItemId: sheetItemId, email: "" }
+        results.push(data);
+        console.log(data)
+
+        await updateDoc(userRef, {
+            lists: arrayUnion(data)
+        })
+        
+        await addDoc(collection(db, "queue"), {
+            list_id: list_id,
+            facebook: facebook,
+            obj_id: obj_id
+        });
+
+    }
+}
+
+// GScrape("https://www.google.com/search?tbm=lcl&q=construction+companies+in+chicago#rlfi=hd:;start:0", "Cgn1TFR8wZ8R9EMMjqf8")
+
+// handler({
+//     body: JSON.stringify({
+//         url: "https://www.google.com/search?tbm=lcl&q=plumbers+in+provo+utah#rlfi=hd:;start:0",
+//         list: "zQXOkToFI2waELTHssAO"
+//     }),
+// })
+
+
+
+
+
